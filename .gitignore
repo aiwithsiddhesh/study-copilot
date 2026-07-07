@@ -16,3 +16,9 @@ wheels/
 *.db
 *.sqlite3
 
+# Test cache
+.pytest_cache/
+
+# Local Claude Code session state (permissions, scheduler locks)
+.claude/
+
