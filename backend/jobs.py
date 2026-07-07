@@ -7,6 +7,7 @@ In-memory only — jobs vanish on process restart, same as the registry.
 """
 
 import asyncio
+import traceback
 from typing import Any, Coroutine
 from uuid import uuid4
 
@@ -37,6 +38,8 @@ def run_job(coro: Coroutine[Any, Any, Any]) -> str:
             _jobs[job_id]["result"] = result
             _jobs[job_id]["status"] = "done"
         except Exception as exc:
+            print(f"=== job {job_id} failed ===")
+            traceback.print_exc()
             _jobs[job_id]["error"] = str(exc)
             _jobs[job_id]["http_status"] = classify_job_exception(exc)
             _jobs[job_id]["status"] = "failed"
