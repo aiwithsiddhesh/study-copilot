@@ -111,12 +111,26 @@ cd frontend
 npm install
 cp .env.example .env   # VITE_API_BASE_URL=http://localhost:8000 (default is already correct)
 cd ..
+
+# Root dev-runner (starts backend + frontend together — see below)
+npm install
 ```
 
 Python >= 3.12 (`.python-version` pins 3.12). No pip/poetry — everything
 goes through `uv`.
 
 ## Running everything
+
+**One command, both servers** (uses [`concurrently`](https://www.npmjs.com/package/concurrently),
+labeled/colored output per process):
+
+```bash
+npm run dev
+# [backend]  → http://localhost:8000  (interactive API docs at /docs)
+# [frontend] → http://localhost:5173
+```
+
+Or run each separately, in two terminals:
 
 **Backend (FastAPI):**
 
