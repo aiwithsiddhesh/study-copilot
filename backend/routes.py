@@ -169,6 +169,22 @@ async def get_plan(student_id: str) -> dict[str, Any]:
         return {"ready": False, "study_plan": None}
     return {"ready": True, "study_plan": study_plan.model_dump()}
 
+@router.get("/students/{student_id}/syllabi")
+async def get_syllabi(student_id: str) -> list[dict[str, Any]]:
+    """The per-subject SyllabusStructure trees (units -> topics) built for
+    this student's plan — the same data StudyPlanFlow.generate_quiz()
+    validates a quiz request against. Lets the frontend offer subject/topic
+    dropdowns instead of free-text entry, which otherwise only surfaces
+    typos as a 422 (unknown subject) or a slow 502 (unknown topic, after
+    the guardrail exhausts its retries). 404 if no Flow exists yet for
+    student_id (same as GET /plan); returns an empty list (not 404) if the
+    Flow exists but /plan hasn't completed yet, since that's a valid,
+    momentary state, not an error.
+    """
+    flow, lock = _get_flow_and_lock(student_id)
+    async with lock:
+        syllabi = flow.state.syllabi
+    return [s.model_dump() for s in syllabi]
 
 @router.post("/students/{student_id}/quiz", status_code=202)
 async def create_quiz(student_id: str, body: QuizRequest) -> dict[str, str]:

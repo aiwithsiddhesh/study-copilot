@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { useCreateQuiz, useSubmitAttempt } from '@/hooks/useQuiz'
 import { QuestionCard, type QuestionAnswerDraft } from '@/components/quiz/QuestionCard'
+import { useSyllabi } from '@/hooks/useSyllabi'
 import { QuizResult } from '@/components/quiz/QuizResult'
 import { JobStatus } from '@/components/shared/JobStatus'
 import { ErrorBanner } from '@/components/shared/ErrorBanner'
@@ -16,8 +17,25 @@ export function Quiz() {
 
   const createQuiz = useCreateQuiz(studentId)
   const submitAttempt = useSubmitAttempt(studentId)
+  const syllabiQuery = useSyllabi(studentId)
 
   const quiz = createQuiz.job?.result
+   const syllabi = useMemo(() => syllabiQuery.data ?? [], [syllabiQuery.data])
+
+  // Every topic (flattened across units) for the currently-selected subject,
+  // in syllabus order — the same source generate_quiz() validates against,
+  // so a dropdown pick can never hit the unknown-subject/topic error paths.
+  const topicsForSubject = useMemo(() => {
+    const syllabus = syllabi.find((s) => s.subject === subject)
+    if (!syllabus) return []
+    return syllabus.units.flatMap((unit) => unit.topics.map((t) => t.topic_name))
+  }, [syllabi, subject])
+
+  // Reset the topic whenever the subject changes so a stale topic from a
+  // different subject's list can never be submitted.
+  useEffect(() => {
+    setTopic('')
+  }, [subject])
 
   function handleRequest() {
     setAnswers([])
@@ -89,13 +107,35 @@ export function Quiz() {
       </header>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {syllabiQuery.isLoading && <p style={{ fontSize: 14, color: 'var(--ink-soft)' }}>Loading your subjects…</p>}
+        {syllabiQuery.isError && <ErrorBanner error="Couldn't load your subjects — try refreshing the page." />}
+        {!syllabiQuery.isLoading && !syllabiQuery.isError && syllabi.length === 0 && (
+          <p style={{ fontSize: 14, color: 'var(--ink-soft)' }}>
+            No subjects yet — build a study plan first, then come back here to request a quiz.
+          </p>
+        )}
         <label>
           <span className="field-label">Subject</span>
-          <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. Mathematics" className="field-input" />
         </label>
+         <select value={subject} onChange={(e) => setSubject(e.target.value)} className="field-input" disabled={syllabi.length === 0}>
+            <option value="">Select a subject…</option>
+            {syllabi.map((s) => (
+              <option key={s.subject} value={s.subject}>
+                {s.subject}
+              </option>
+            ))}
+          </select>
         <label>
           <span className="field-label">Topic</span>
-          <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="e.g. Irrational numbers" className="field-input" />
+          
+          <select value={topic} onChange={(e) => setTopic(e.target.value)} className="field-input" disabled={!subject}>
+            <option value="">Select a topic…</option>
+            {topicsForSubject.map((topicName) => (
+              <option key={topicName} value={topicName}>
+                {topicName}
+              </option>
+            ))}
+          </select>
         </label>
         <button
           type="button"
