@@ -10,6 +10,16 @@ asyncio.Lock for its full duration, per the concurrency requirement — one
 student's requests queue against each other; different students never
 contend.
 
+/plan takes each subject as raw text (however the student typed/pasted it —
+there is no separate "already structured" input shape) and converts it via
+SyllabusExtractorCrew before handing the result to StudyPlanFlow. One path:
+raw text in, syllabus out, straight into the Flow — no draft, no review
+step, no confirm step. If a subject's text is unrelated to its declared
+subject_name or isn't a syllabus at all, the extractor's guardrail rejects
+it and the whole /plan job fails for that student (see
+backend.errors.classify_job_exception's 502 mapping) rather than silently
+building a plan from garbage.
+
 /plan, /quiz, /attempts run their Flow operation as a background job
 (backend.jobs.run_job) since each can take LLM-call-length time. The
 route itself only schedules the job and returns 202 {job_id}; the actual
@@ -25,13 +35,27 @@ from pydantic import BaseModel
 
 from backend import jobs, registry
 from backend.errors import job_not_found_error, student_not_found_error
+from crewai_core.crews.syllabus_extractor.crew import SyllabusExtractorCrew
 from crewai_core.models.quiz_attempt import QuizAttempt
+from crewai_core.models.syllabus import SyllabusStructure, SyllabusTopic, SyllabusUnit
+from crewai_core.models.syllabus_draft import SyllabusDraft
 
 router = APIRouter()
 
 
+class RawSubjectSyllabus(BaseModel):
+    """One subject's syllabus exactly as the student typed/pasted it in —
+    plain text, any layout, any level of organization. There is no separate
+    "already structured" input shape; every subject goes through the same
+    conversion step (see _convert_subject below) on the way into the plan."""
+
+    subject_name: str
+    grade: str
+    raw_index_text: str
+
+
 class CreatePlanRequest(BaseModel):
-    raw_syllabi: list[dict]
+    subjects: list[RawSubjectSyllabus]
     raw_calendar: dict
 
 
@@ -52,16 +76,73 @@ def _get_flow_and_lock(student_id: str):
     return entry
 
 
+async def _convert_subject(subject: RawSubjectSyllabus) -> SyllabusStructure:
+    """The one conversion step: raw text in, a clean SyllabusStructure out.
+    Runs SyllabusExtractorCrew's guardrail-checked extraction; if the text
+    is unrelated to subject_name or isn't a syllabus at all, this raises
+    (the crew's guardrail rejects it and retries are exhausted) and the
+    whole /plan request fails for this student rather than silently
+    building a plan from garbage. No draft, no review step, no separate
+    path for input that happens to already look organized — every subject
+    goes through this same conversion on the way to StudyPlanFlow.
+
+    The result is handed to StudyPlanFlow as pre_analyzed_syllabi, NOT run
+    through SyllabusAnalystCrew inside the Flow — re-running that crew on
+    data this conversion already produced clean wouldn't validate
+    anything real (its guardrail would just compare the output back
+    against the same input it started from)."""
+
+    crew_instance = SyllabusExtractorCrew(
+        subject_name=subject.subject_name,
+        grade=subject.grade,
+        raw_index_text=subject.raw_index_text,
+    )
+    result = await crew_instance.crew().kickoff_async(
+        inputs={
+            "subject_name": crew_instance.subject_name,
+            "grade": crew_instance.grade,
+            "raw_index_text": crew_instance.raw_index_text,
+        }
+    )
+    draft: SyllabusDraft = result.pydantic
+    return SyllabusStructure(
+        grade=draft.grade,
+        subject=draft.subject,
+        units=[
+            SyllabusUnit(
+                unit_name=unit.unit_name,
+                weightage_percent=unit.weightage_percent,
+                topics=[
+                    SyllabusTopic(topic_name=topic.topic_name, sub_topics=list(topic.sub_topics))
+                    for topic in unit.topics
+                ],
+            )
+            for unit in draft.units
+        ],
+    )
+
+
 @router.post("/students/{student_id}/plan", status_code=202)
 async def create_plan(student_id: str, body: CreatePlanRequest) -> dict[str, str]:
-    flow, lock = registry.create_or_replace(student_id, body.raw_syllabi, body.raw_calendar)
+    """Converts every subject's raw text straight into a syllabus, then
+    kicks off the Flow — one path, no intermediate draft/review/confirm
+    step, and no redundant second AI pass through SyllabusAnalystCrew
+    inside the Flow (see registry.create_or_replace's pre_analyzed_syllabi).
+    Runs as a background job (same pattern as /quiz, /attempts) since both
+    the conversion and the Flow itself are LLM-call-length; poll
+    GET /jobs/{job_id} for the result."""
 
-    async def _kickoff() -> dict[str, Any] | None:
+    async def _convert_then_kickoff() -> dict[str, Any] | None:
+        syllabi = [await _convert_subject(subject) for subject in body.subjects]
+        raw_syllabi = [s.model_dump() for s in syllabi]
+        flow, lock = registry.create_or_replace(
+            student_id, raw_syllabi, body.raw_calendar, pre_analyzed_syllabi=syllabi
+        )
         async with lock:
             await flow.kickoff_async()
             return flow.state.study_plan.model_dump() if flow.state.study_plan else None
 
-    job_id = jobs.run_job(_kickoff())
+    job_id = jobs.run_job(_convert_then_kickoff())
     return {"job_id": job_id}
 
 

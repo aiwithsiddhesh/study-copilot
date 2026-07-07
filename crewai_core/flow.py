@@ -218,21 +218,46 @@ async def _optimize_remaining_plan(
 class StudyPlanFlow(Flow[StudyPlanFlowState]):
     """One Flow instance per student. See module docstring for wiring."""
 
-    def __init__(self, raw_syllabi: list[dict], raw_calendar: dict, **kwargs):
+    def __init__(
+        self,
+        raw_syllabi: list[dict],
+        raw_calendar: dict,
+        pre_analyzed_syllabi: list[SyllabusStructure] | None = None,
+        **kwargs,
+    ):
+        """pre_analyzed_syllabi: already-converted SyllabusStructure objects
+        (e.g. from backend/routes.py's single syllabus-conversion step,
+        which already ran its own guardrail-checked extraction). When
+        given, analyze_all_syllabi() uses these directly and does NOT call
+        SyllabusAnalystCrew again — re-running that crew on data that's
+        already in clean SyllabusStructure shape wouldn't validate
+        anything: its guardrail compares its own output back against its
+        own input, which passes trivially when the input is already
+        correct. raw_syllabi is still required and used for state.grade in
+        that case; when pre_analyzed_syllabi is None (e.g. the CLI's raw
+        fixture JSON), behavior is unchanged — one SyllabusAnalystCrew call
+        per entry in raw_syllabi, exactly as before."""
+
         super().__init__(**kwargs)
         self._raw_syllabi = raw_syllabi
         self._raw_calendar = raw_calendar
+        self._pre_analyzed_syllabi = pre_analyzed_syllabi
 
     @start()
     async def analyze_all_syllabi(self) -> list[SyllabusStructure]:
-        results = await asyncio.gather(
-            *(_analyze_subject(entry) for entry in self._raw_syllabi)
-        )
-        self.state.syllabi = list(results)
+        if self._pre_analyzed_syllabi is not None:
+            results = list(self._pre_analyzed_syllabi)
+        else:
+            results = list(
+                await asyncio.gather(
+                    *(_analyze_subject(entry) for entry in self._raw_syllabi)
+                )
+            )
+        self.state.syllabi = results
         if self._raw_syllabi:
             self.state.grade = self._raw_syllabi[0].get("grade", "")
         print(f"\nDone analyzing {len(results)} subjects.\n")
-        return list(results)
+        return results
 
     @start()
     def parse_calendar(self) -> CalendarStructure:

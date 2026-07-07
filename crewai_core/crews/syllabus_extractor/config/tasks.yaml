@@ -1,0 +1,58 @@
+extract_syllabus_task:
+  description: >
+    A student has pasted the following raw index/table-of-contents text for
+    one subject. It may use inconsistent numbering, indentation, or
+    formatting, and may not be valid JSON or any fixed format at all — infer
+    its unit/topic/sub-topic structure from its own headings and
+    indentation, however it is formatted:
+
+    Subject: {subject_name}
+    Grade: {grade}
+
+    Raw index text:
+    {raw_index_text}
+
+    FIRST, before extracting anything: check whether this text's overall
+    subject matter is actually consistent with "{subject_name}". If the
+    text is clearly about a different subject (for example, an essay or
+    index for history/literature/science when "{subject_name}" is
+    Mathematics, or vice versa), set subject_mismatch to true, give a short
+    subject_mismatch_reason explaining the mismatch, and output an empty
+    units list — do NOT attempt to extract units/topics/sub_topics from
+    unrelated content.
+
+    If the subject matter is consistent with "{subject_name}", proceed to
+    extract:
+      - Parse the text into units, each containing topics, each optionally
+        containing sub_topics, based on the text's own heading/indentation
+        structure.
+      - Do NOT invent any unit, topic, or sub_topic that is not
+        recognizably present in the raw text in some form.
+      - Do NOT drop any line that clearly represents a unit, topic, or
+        sub_topic.
+      - For each topic, if you are genuinely unsure whether a line is a
+        topic or a sub-topic, or otherwise unsure how to classify it, set
+        that topic's source_confidence to "uncertain" rather than silently
+        guessing. Otherwise leave it as "matched".
+      - For weightage_percent, per unit: actively look for a stated
+        weightage near that unit's heading (e.g. a trailing "%", "marks",
+        or "weightage" annotation) and use that exact value when present,
+        setting weightage_is_estimated to false for that unit. For any
+        unit where no stated weightage is found in the text, split the
+        REMAINING percentage (100 minus the sum of all stated values found
+        elsewhere) equally across just those units, and set
+        weightage_is_estimated to true only for those units. If no unit
+        anywhere has a stated weightage, split 100 equally across all
+        units, all marked weightage_is_estimated true. Do NOT rescale or
+        normalize stated values you found in the text, even if they sum to
+        more than 100 — report them exactly as found.
+
+    Output must match the SyllabusDraft schema exactly.
+  expected_output: >
+    A structured JSON object matching the SyllabusDraft schema: grade,
+    subject, a units list (each with unit_name, weightage_percent,
+    weightage_is_estimated, and a topics list of
+    {{topic_name, sub_topics, source_confidence}}), plus subject_mismatch
+    and subject_mismatch_reason. If subject_mismatch is true, units must be
+    an empty list.
+  agent: syllabus_extractor

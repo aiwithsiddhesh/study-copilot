@@ -14,6 +14,7 @@ discipline around using them.
 import asyncio
 
 from crewai_core.flow import StudyPlanFlow
+from crewai_core.models.syllabus import SyllabusStructure
 
 _registry: dict[str, tuple[StudyPlanFlow, asyncio.Lock]] = {}
 
@@ -23,12 +24,20 @@ def get(student_id: str) -> tuple[StudyPlanFlow, asyncio.Lock] | None:
 
 
 def create_or_replace(
-    student_id: str, raw_syllabi: list[dict], raw_calendar: dict
+    student_id: str,
+    raw_syllabi: list[dict],
+    raw_calendar: dict,
+    pre_analyzed_syllabi: list[SyllabusStructure] | None = None,
 ) -> tuple[StudyPlanFlow, asyncio.Lock]:
     """(Re)create the Flow for this student. A repeat call for a student_id
     that already has a Flow is a deliberate "start this student over": the
     prior Flow instance (and its accumulated quiz_history/weak_topics/
     wellbeing_flags) is discarded, not merged or rejected.
+
+    pre_analyzed_syllabi: passed straight through to StudyPlanFlow — see
+    its docstring. backend/routes.py's /plan already converts each
+    subject's raw text via SyllabusExtractorCrew before calling this, so
+    the Flow must not re-run SyllabusAnalystCrew on already-clean data.
     """
     if student_id in _registry:
         print(
@@ -36,7 +45,11 @@ def create_or_replace(
             "prior quiz_history/weak_topics/wellbeing_flags are discarded ==="
         )
 
-    flow = StudyPlanFlow(raw_syllabi=raw_syllabi, raw_calendar=raw_calendar)
+    flow = StudyPlanFlow(
+        raw_syllabi=raw_syllabi,
+        raw_calendar=raw_calendar,
+        pre_analyzed_syllabi=pre_analyzed_syllabi,
+    )
     lock = asyncio.Lock()
     _registry[student_id] = (flow, lock)
     return flow, lock

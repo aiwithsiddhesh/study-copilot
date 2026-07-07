@@ -2,15 +2,21 @@
 
 No real LLM calls: crewai.agent.core.Agent.execute_task is monkeypatched to
 return a canned JSON string matching whatever Task.output_pydantic expects
-(SyllabusStructure / CalendarStructure / StudyPlan / QuizSet /
-PlanRevision), dispatched purely on that type. This still runs the REAL
-Task/Crew/guardrail machinery (Task._export_output's JSON parsing, and
-every guardrail in crews/*/guardrails.py) against the canned output — the
-project has no prior Crew-mocking pattern to follow (all existing testing
-used Crew.test() against real LLM calls), so this establishes one at the
-lowest boundary that still exercises real guardrail logic, including the
-real guardrail-exhaustion exception when a canned output is deliberately
-made to fail validation.
+(SyllabusDraft / CalendarStructure / StudyPlan / QuizSet / PlanRevision),
+dispatched purely on that type. This still runs the REAL Task/Crew/guardrail
+machinery (Task._export_output's JSON parsing, and every guardrail in
+crews/*/guardrails.py) against the canned output — the project has no prior
+Crew-mocking pattern to follow (all existing testing used Crew.test()
+against real LLM calls), so this establishes one at the lowest boundary
+that still exercises real guardrail logic, including the real
+guardrail-exhaustion exception when a canned output is deliberately made to
+fail validation.
+
+/plan takes raw text per subject now (there is no separate "already
+structured" input path — see backend/routes.py's module docstring): every
+subject is converted via SyllabusExtractorCrew before StudyPlanFlow ever
+sees it. RAW_SUBJECTS below is the request body shape; _SYLLABUS_DRAFT is
+the canned extractor output the mocked Agent.execute_task returns for it.
 
 Fixture shape: one subject ("TestSubject"), one unit, one topic
 ("TestTopic"), no sub-topics, and a 5-day/2h-per-day calendar with no
@@ -35,10 +41,19 @@ from crewai_core.models.quiz import QuizQuestion, QuizSet
 from crewai_core.models.quiz_attempt import QuestionAnswer, QuizAttempt
 from crewai_core.models.study_plan import DayPlan, StudyPlan, StudyPlanEntry
 from crewai_core.models.syllabus import SyllabusStructure, SyllabusTopic, SyllabusUnit
+from crewai_core.models.syllabus_draft import SyllabusDraft
 from crewai_core.models.weak_topic import TopicStatus
 
 SUBJECT = "TestSubject"
 TOPIC = "TestTopic"
+
+RAW_SUBJECTS = [
+    {
+        "subject_name": SUBJECT,
+        "grade": "10",
+        "raw_index_text": "UnitA (100%)\n  TestTopic",
+    }
+]
 
 RAW_SYLLABI = [
     {
@@ -75,6 +90,41 @@ _SYLLABUS_STRUCTURE = SyllabusStructure(
 _CALENDAR_STRUCTURE = CalendarStructure.model_validate(RAW_CALENDAR)
 _DAY_BUDGET = allocate_days_to_subjects(_CALENDAR_STRUCTURE, [_SYLLABUS_STRUCTURE])[SUBJECT]
 
+# What the mocked SyllabusExtractorCrew task returns for RAW_SUBJECTS[0] —
+# the one and only conversion step /plan now runs on every subject's raw
+# text before handing it to StudyPlanFlow.
+_SYLLABUS_DRAFT = SyllabusDraft.model_validate(
+    {
+        "grade": "10",
+        "subject": SUBJECT,
+        "units": [
+            {
+                "unit_name": "UnitA",
+                "weightage_percent": 100,
+                "weightage_is_estimated": False,
+                "topics": [
+                    {"topic_name": TOPIC, "sub_topics": [], "source_confidence": "matched"}
+                ],
+            }
+        ],
+        "subject_mismatch": False,
+        "subject_mismatch_reason": None,
+    }
+)
+
+# subject_mismatch=True -> _convert_subject's SyllabusExtractorCrew
+# guardrail hard-rejects on every retry, so the /plan job fails for this
+# student rather than silently building a plan from unrelated text.
+_MISMATCHED_SYLLABUS_DRAFT = SyllabusDraft.model_validate(
+    {
+        "grade": "10",
+        "subject": SUBJECT,
+        "units": [],
+        "subject_mismatch": True,
+        "subject_mismatch_reason": "Source text is unrelated to the declared subject.",
+    }
+)
+
 # A valid StudyPlan covering every budgeted day with the one real topic,
 # never exceeding that day's budgeted hours -> passes the Plan Generator
 # guardrail (full topic coverage, no invented topics/days, no hour overrun).
@@ -99,18 +149,21 @@ _INVALID_STUDY_PLAN = StudyPlan(
 )
 
 
-def _fake_execute_task(monkeypatch, *, study_plan=None):
+def _fake_execute_task(monkeypatch, *, study_plan=None, syllabus_draft=None):
     """Patch Agent.execute_task to return canned JSON dispatched purely on
     task.output_pydantic, so every crew's real Task/guardrail machinery
     still runs against it. study_plan overrides the StudyPlan case (used to
-    force a guardrail-exhaustion failure in specific tests).
+    force a guardrail-exhaustion failure in specific tests). syllabus_draft
+    overrides the SyllabusDraft case (used to force the extractor's
+    subject_mismatch guardrail rejection in specific tests).
     """
     plan_to_use = study_plan or _VALID_STUDY_PLAN
+    draft_to_use = syllabus_draft or _SYLLABUS_DRAFT
 
     def fake(self, task, context=None, tools=None):
         model = task.output_pydantic
-        if model is SyllabusStructure:
-            return _SYLLABUS_STRUCTURE.model_dump_json()
+        if model is SyllabusDraft:
+            return draft_to_use.model_dump_json()
         if model is CalendarStructure:
             return _CALENDAR_STRUCTURE.model_dump_json()
         if model is StudyPlan:
@@ -196,10 +249,10 @@ def _wait_for_job(client, job_id, timeout=15.0):
     raise TimeoutError(f"job {job_id} did not finish in {timeout}s")
 
 
-def _create_plan(client, student_id="student-1"):
+def _create_plan(client, student_id="student-1", subjects=None):
     resp = client.post(
         f"/students/{student_id}/plan",
-        json={"raw_syllabi": RAW_SYLLABI, "raw_calendar": RAW_CALENDAR},
+        json={"subjects": subjects or RAW_SUBJECTS, "raw_calendar": RAW_CALENDAR},
     )
     assert resp.status_code == 202
     job_id = resp.json()["job_id"]
@@ -453,13 +506,30 @@ def test_plan_generation_guardrail_exhaustion_returns_502(client, monkeypatch):
 
     resp = client.post(
         "/students/student-bad-plan/plan",
-        json={"raw_syllabi": RAW_SYLLABI, "raw_calendar": RAW_CALENDAR},
+        json={"subjects": RAW_SUBJECTS, "raw_calendar": RAW_CALENDAR},
     )
     assert resp.status_code == 202
     job = _wait_for_job(client, resp.json()["job_id"])
     assert job["status"] == "failed"
     assert job["http_status"] == 502
     assert "validation" in job["error"].lower() or "retries" in job["error"].lower()
+
+
+def test_plan_creation_rejects_mismatched_subject_text_returns_502(client, monkeypatch):
+    """The one conversion step (SyllabusExtractorCrew) hard-rejects text
+    that doesn't match its declared subject — the whole /plan job fails for
+    that student rather than silently building a plan from unrelated text.
+    """
+    _fake_execute_task(monkeypatch, syllabus_draft=_MISMATCHED_SYLLABUS_DRAFT)
+
+    resp = client.post(
+        "/students/student-mismatch/plan",
+        json={"subjects": RAW_SUBJECTS, "raw_calendar": RAW_CALENDAR},
+    )
+    assert resp.status_code == 202
+    job = _wait_for_job(client, resp.json()["job_id"])
+    assert job["status"] == "failed"
+    assert job["http_status"] == 502
 
 
 def test_quiz_unknown_topic_guardrail_exhaustion_returns_502(client, monkeypatch):
